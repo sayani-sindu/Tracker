@@ -5,7 +5,11 @@ import { useData } from '../store';
 import { HabitForm } from './HabitForm';
 import { colors, spacing } from '../theme';
 
-export function HabitsScreen() {
+type Props = {
+  onSignOut: () => void;
+};
+
+export function HabitsScreen({ onSignOut }: Props) {
   const { habits } = useData();
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Habit | null>(null);
@@ -42,6 +46,10 @@ export function HabitsScreen() {
           ))}
         </>
       ) : null}
+
+      <Pressable onPress={onSignOut} style={styles.signOut} accessibilityRole="button">
+        <Text style={styles.signOutText}>Sign out</Text>
+      </Pressable>
 
       <HabitForm visible={formOpen} habit={editing} onClose={() => setFormOpen(false)} />
     </ScrollView>
@@ -113,6 +121,15 @@ const styles = StyleSheet.create({
   },
   itemMuted: {
     color: colors.muted,
+  },
+  signOut: {
+    marginTop: 40,
+    alignItems: 'center',
+    paddingVertical: 12,
+  },
+  signOutText: {
+    fontSize: 16,
+    color: colors.danger,
   },
   itemNote: {
     marginTop: 3,

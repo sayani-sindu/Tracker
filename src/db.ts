@@ -1,10 +1,7 @@
-import * as SQLite from 'expo-sqlite';
-import { toDateKey } from './lib/dates';
-
-export type DB = SQLite.SQLiteDatabase;
+import { supabase } from './lib/supabase';
 
 export type Habit = {
-  id: number;
+  id: string;
   name: string;
   note: string;
   archived: boolean;
@@ -13,103 +10,74 @@ export type Habit = {
 };
 
 type HabitRow = {
-  id: number;
+  id: string;
   name: string;
   note: string;
-  archived: number;
+  archived: boolean;
   position: number;
   created_on: string;
 };
 
-const DEFAULT_HABITS = [
-  'Wake up by 7 AM',
-  'No morning Instagram',
-  'Complete gym session',
-  'Complete priority work',
-  'Avoid unnecessary overtime',
-  'Learning / career growth',
-  'Read for 10 minutes',
-  'Sleep by 11 PM',
-];
+const PAGE_SIZE = 1000; // Supabase returns at most 1000 rows per request
 
-export async function openDatabase(): Promise<DB> {
-  const db = await SQLite.openDatabaseAsync('tracker.db');
-
-  await db.execAsync(`
-    PRAGMA foreign_keys = ON;
-
-    CREATE TABLE IF NOT EXISTS habits (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      name       TEXT    NOT NULL,
-      note       TEXT    NOT NULL DEFAULT '',
-      archived   INTEGER NOT NULL DEFAULT 0,
-      position   INTEGER NOT NULL DEFAULT 0,
-      created_on TEXT    NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS completions (
-      habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
-      date     TEXT    NOT NULL,
-      PRIMARY KEY (habit_id, date)
-    );
-
-    CREATE TABLE IF NOT EXISTS day_notes (
-      date TEXT PRIMARY KEY,
-      body TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS settings (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-  `);
-
-  // Seed the starting habits once, on first launch only
-  const seeded = await db.getFirstAsync<{ value: string }>(
-    `SELECT value FROM settings WHERE key = 'seeded'`,
-  );
-  if (!seeded) {
-    const today = toDateKey();
-    await db.withTransactionAsync(async () => {
-      for (let i = 0; i < DEFAULT_HABITS.length; i++) {
-        await db.runAsync(
-          `INSERT INTO habits (name, position, created_on) VALUES (?, ?, ?)`,
-          [DEFAULT_HABITS[i], i, today],
-        );
-      }
-      await db.runAsync(`INSERT INTO settings (key, value) VALUES ('seeded', '1')`);
-    });
-  }
-
-  return db;
+function check(error: { message: string } | null) {
+  if (error) throw new Error(error.message);
 }
 
-export async function fetchHabits(db: DB): Promise<Habit[]> {
-  const rows = await db.getAllAsync<HabitRow>(
-    `SELECT id, name, note, archived, position, created_on
-       FROM habits
-      ORDER BY archived ASC, position ASC, id ASC`,
+// Reads every row, page by page, so no data is cut off
+async function fetchAll<T>(
+  load: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await load(from, from + PAGE_SIZE - 1);
+    check(error);
+    const page = data ?? [];
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) break;
+  }
+  return rows;
+}
+
+export async function fetchHabits(): Promise<Habit[]> {
+  const rows = await fetchAll<HabitRow>((from, to) =>
+    supabase
+      .from('habits')
+      .select('id, name, note, archived, position, created_on')
+      .order('archived', { ascending: true })
+      .order('position', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, to),
   );
   return rows.map(r => ({
     id: r.id,
     name: r.name,
     note: r.note,
-    archived: r.archived === 1,
+    archived: r.archived,
     position: r.position,
     createdOn: r.created_on,
   }));
 }
 
-export async function fetchCompletions(db: DB): Promise<{ habitId: number; date: string }[]> {
-  const rows = await db.getAllAsync<{ habit_id: number; date: string }>(
-    `SELECT habit_id, date FROM completions`,
+export async function fetchCompletions(): Promise<{ habitId: string; date: string }[]> {
+  const rows = await fetchAll<{ habit_id: string; date: string }>((from, to) =>
+    supabase
+      .from('completions')
+      .select('habit_id, date')
+      .order('habit_id', { ascending: true })
+      .order('date', { ascending: true })
+      .range(from, to),
   );
   return rows.map(r => ({ habitId: r.habit_id, date: r.date }));
 }
 
-export async function fetchNotes(db: DB): Promise<Record<string, string>> {
-  const rows = await db.getAllAsync<{ date: string; body: string }>(
-    `SELECT date, body FROM day_notes`,
+export async function fetchNotes(): Promise<Record<string, string>> {
+  const rows = await fetchAll<{ date: string; body: string }>((from, to) =>
+    supabase
+      .from('day_notes')
+      .select('date, body')
+      .order('date', { ascending: true })
+      .range(from, to),
   );
   const out: Record<string, string> = {};
   for (const r of rows) out[r.date] = r.body;
@@ -117,57 +85,72 @@ export async function fetchNotes(db: DB): Promise<Record<string, string>> {
 }
 
 export async function setCompletion(
-  db: DB,
-  habitId: number,
+  userId: string,
+  habitId: string,
   date: string,
   done: boolean,
 ): Promise<void> {
   if (done) {
-    await db.runAsync(
-      `INSERT OR IGNORE INTO completions (habit_id, date) VALUES (?, ?)`,
-      [habitId, date],
-    );
+    const { error } = await supabase
+      .from('completions')
+      .upsert(
+        { user_id: userId, habit_id: habitId, date },
+        { onConflict: 'habit_id,date', ignoreDuplicates: true },
+      );
+    check(error);
   } else {
-    await db.runAsync(
-      `DELETE FROM completions WHERE habit_id = ? AND date = ?`,
-      [habitId, date],
-    );
+    const { error } = await supabase
+      .from('completions')
+      .delete()
+      .eq('habit_id', habitId)
+      .eq('date', date);
+    check(error);
   }
 }
 
-export async function setDayNote(db: DB, date: string, body: string): Promise<void> {
+export async function setDayNote(userId: string, date: string, body: string): Promise<void> {
   const trimmed = body.trim();
   if (trimmed === '') {
-    await db.runAsync(`DELETE FROM day_notes WHERE date = ?`, [date]);
+    const { error } = await supabase.from('day_notes').delete().eq('date', date);
+    check(error);
   } else {
-    await db.runAsync(
-      `INSERT INTO day_notes (date, body) VALUES (?, ?)
-       ON CONFLICT(date) DO UPDATE SET body = excluded.body`,
-      [date, trimmed],
-    );
+    const { error } = await supabase
+      .from('day_notes')
+      .upsert({ user_id: userId, date, body: trimmed }, { onConflict: 'user_id,date' });
+    check(error);
   }
 }
 
-export async function insertHabit(db: DB, name: string, note: string): Promise<void> {
-  await db.runAsync(
-    `INSERT INTO habits (name, note, position, created_on)
-     VALUES (?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM habits), ?)`,
-    [name, note, toDateKey()],
-  );
+export async function insertHabit(
+  userId: string,
+  name: string,
+  note: string,
+  position: number,
+  createdOn: string,
+): Promise<void> {
+  const { error } = await supabase.from('habits').insert({
+    user_id: userId,
+    name,
+    note,
+    position,
+    created_on: createdOn,
+  });
+  check(error);
 }
 
 export async function updateHabit(
-  db: DB,
-  id: number,
+  id: string,
   fields: { name: string; note: string; archived: boolean },
 ): Promise<void> {
-  await db.runAsync(
-    `UPDATE habits SET name = ?, note = ?, archived = ? WHERE id = ?`,
-    [fields.name, fields.note, fields.archived ? 1 : 0, id],
-  );
+  const { error } = await supabase
+    .from('habits')
+    .update({ name: fields.name, note: fields.note, archived: fields.archived })
+    .eq('id', id);
+  check(error);
 }
 
-// Deleting a habit also removes its completions (ON DELETE CASCADE)
-export async function removeHabit(db: DB, id: number): Promise<void> {
-  await db.runAsync(`DELETE FROM habits WHERE id = ?`, [id]);
+// Completions for this habit are removed automatically by the database
+export async function removeHabit(id: string): Promise<void> {
+  const { error } = await supabase.from('habits').delete().eq('id', id);
+  check(error);
 }

@@ -1,23 +1,22 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Alert } from 'react-native';
 import {
-  DB,
   Habit,
   fetchCompletions,
   fetchHabits,
   fetchNotes,
   insertHabit,
-  openDatabase,
   removeHabit,
   setCompletion,
   setDayNote,
   updateHabit,
 } from './db';
+import { toDateKey } from './lib/dates';
 
-type DoneMap = Record<number, Set<string>>;
+type DoneMap = Record<string, Set<string>>;
 
 export type HabitInput = {
-  id?: number;
+  id?: string;
   name: string;
   note: string;
   archived: boolean;
@@ -28,29 +27,29 @@ type StoreValue = {
   habits: Habit[];
   activeHabits: Habit[];
   notes: Record<string, string>;
-  datesFor: (habitId: number) => Set<string>;
-  isDone: (habitId: number, date: string) => boolean;
-  toggle: (habitId: number, date: string) => Promise<void>;
+  datesFor: (habitId: string) => Set<string>;
+  isDone: (habitId: string, date: string) => boolean;
+  toggle: (habitId: string, date: string) => Promise<void>;
   saveHabit: (input: HabitInput) => Promise<void>;
-  deleteHabit: (id: number) => Promise<void>;
+  deleteHabit: (id: string) => Promise<void>;
   saveNote: (date: string, body: string) => Promise<void>;
 };
 
 const EMPTY_SET = new Set<string>();
 const StoreContext = createContext<StoreValue | null>(null);
 
-export function DataProvider({ children }: { children: React.ReactNode }) {
-  const [db, setDb] = useState<DB | null>(null);
+function errorText(e: unknown): string {
+  return (e as { message?: string })?.message ?? String(e);
+}
+
+export function DataProvider({ userId, children }: { userId: string; children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [habits, setHabits] = useState<Habit[]>([]);
   const [done, setDone] = useState<DoneMap>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
 
-  const reloadHabits = useCallback(async (database: DB) => {
-    const [loadedHabits, completions] = await Promise.all([
-      fetchHabits(database),
-      fetchCompletions(database),
-    ]);
+  const reloadHabits = useCallback(async () => {
+    const [loadedHabits, completions] = await Promise.all([fetchHabits(), fetchCompletions()]);
     const map: DoneMap = {};
     for (const row of completions) {
       if (!map[row.habitId]) map[row.habitId] = new Set<string>();
@@ -61,34 +60,36 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const database = await openDatabase();
-        setDb(database);
-        await reloadHabits(database);
-        setNotes(await fetchNotes(database));
+        await reloadHabits();
+        const loadedNotes = await fetchNotes();
+        if (!cancelled) setNotes(loadedNotes);
       } catch (e) {
-        Alert.alert('Could not open your data', String(e));
+        if (!cancelled) Alert.alert('Could not load your data', errorText(e));
       } finally {
-        setReady(true);
+        if (!cancelled) setReady(true);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [reloadHabits]);
 
   const run = useCallback(async (action: () => Promise<void>) => {
     try {
       await action();
     } catch (e) {
-      Alert.alert('Something went wrong', String(e));
+      Alert.alert('Something went wrong', errorText(e));
     }
   }, []);
 
   const toggle = useCallback(
-    (habitId: number, date: string) =>
+    (habitId: string, date: string) =>
       run(async () => {
-        if (!db) return;
         const wasDone = done[habitId]?.has(date) ?? false;
-        await setCompletion(db, habitId, date, !wasDone);
+        await setCompletion(userId, habitId, date, !wasDone);
         setDone(prev => {
           const set = new Set(prev[habitId] ?? []);
           if (wasDone) set.delete(date);
@@ -96,40 +97,37 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           return { ...prev, [habitId]: set };
         });
       }),
-    [db, done, run],
+    [userId, done, run],
   );
 
   const saveHabit = useCallback(
     (input: HabitInput) =>
       run(async () => {
-        if (!db) return;
         const name = input.name.trim();
         const note = input.note.trim();
         if (input.id === undefined) {
-          await insertHabit(db, name, note);
+          await insertHabit(userId, name, note, habits.length, toDateKey());
         } else {
-          await updateHabit(db, input.id, { name, note, archived: input.archived });
+          await updateHabit(input.id, { name, note, archived: input.archived });
         }
-        await reloadHabits(db);
+        await reloadHabits();
       }),
-    [db, run, reloadHabits],
+    [userId, habits.length, run, reloadHabits],
   );
 
   const deleteHabit = useCallback(
-    (id: number) =>
+    (id: string) =>
       run(async () => {
-        if (!db) return;
-        await removeHabit(db, id);
-        await reloadHabits(db);
+        await removeHabit(id);
+        await reloadHabits();
       }),
-    [db, run, reloadHabits],
+    [run, reloadHabits],
   );
 
   const saveNote = useCallback(
     (date: string, body: string) =>
       run(async () => {
-        if (!db) return;
-        await setDayNote(db, date, body);
+        await setDayNote(userId, date, body);
         setNotes(prev => {
           const next = { ...prev };
           const trimmed = body.trim();
@@ -138,7 +136,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           return next;
         });
       }),
-    [db, run],
+    [userId, run],
   );
 
   const value = useMemo<StoreValue>(
@@ -147,8 +145,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       habits,
       activeHabits: habits.filter(h => !h.archived),
       notes,
-      datesFor: (habitId: number) => done[habitId] ?? EMPTY_SET,
-      isDone: (habitId: number, date: string) => done[habitId]?.has(date) ?? false,
+      datesFor: (habitId: string) => done[habitId] ?? EMPTY_SET,
+      isDone: (habitId: string, date: string) => done[habitId]?.has(date) ?? false,
       toggle,
       saveHabit,
       deleteHabit,

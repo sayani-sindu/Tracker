@@ -1,9 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import type { Session } from '@supabase/supabase-js';
 
-import { DataProvider, useData } from './src/store';
+import { supabase } from './src/lib/supabase';
+import { DataProvider } from './src/store';
+import { AuthScreen } from './src/screens/AuthScreen';
 import { TodayScreen } from './src/screens/TodayScreen';
 import { HabitsScreen } from './src/screens/HabitScreen';
 import { StatsScreen } from './src/screens/StatsScreen';
@@ -21,15 +24,53 @@ const TABS: { key: Tab; label: string }[] = [
 export default function App() {
   return (
     <SafeAreaProvider>
-      <DataProvider>
-        <Shell />
-      </DataProvider>
+      <Root />
     </SafeAreaProvider>
   );
 }
 
-function Shell() {
-  const { ready } = useData();
+// Decides what to show: a loading spinner, the login screen, or the app for the signed-in user
+function Root() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setChecking(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, next) => {
+      setSession(next);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  if (checking) {
+    return (
+      <SafeAreaView style={styles.center}>
+        <StatusBar style="dark" />
+        <ActivityIndicator color={colors.accent} />
+      </SafeAreaView>
+    );
+  }
+
+  if (!session) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
+        <AuthScreen />
+      </SafeAreaView>
+    );
+  }
+
+  // Keying on the user id makes sure one user's data never shows for another
+  return (
+    <DataProvider key={session.user.id} userId={session.user.id}>
+      <Shell onSignOut={() => supabase.auth.signOut()} />
+    </DataProvider>
+  );
+}
+
+function Shell({ onSignOut }: { onSignOut: () => void }) {
   const [tab, setTab] = useState<Tab>('today');
   // null means "today". A value is set only when a past day is opened from Stats.
   const [viewDate, setViewDate] = useState<string | null>(null);
@@ -46,15 +87,6 @@ function Shell() {
     setTab('today');
   }
 
-  if (!ready) {
-    return (
-      <SafeAreaView style={styles.center}>
-        <StatusBar style="dark" />
-        <ActivityIndicator color={colors.accent} />
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
       <StatusBar style="dark" />
@@ -63,7 +95,7 @@ function Shell() {
         {tab === 'today' ? (
           <TodayScreen date={viewDate ?? today} onBackToToday={() => setViewDate(null)} />
         ) : null}
-        {tab === 'habits' ? <HabitsScreen /> : null}
+        {tab === 'habits' ? <HabitsScreen onSignOut={onSignOut} /> : null}
         {tab === 'stats' ? <StatsScreen onOpenDate={openDate} /> : null}
       </View>
 
