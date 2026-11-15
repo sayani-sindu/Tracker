@@ -4,10 +4,11 @@
     "slug": "Tracker",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/ownIcon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.app.habitTracker"
     },
     "android": {
       "adaptiveIcon": {
@@ -19,7 +20,14 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
-    }
+      "name": "Tracker",
+      "shortName": "Tracker",
+      "backgroundColor": "#F5F6F7",
+      "themeColor": "#F5F6F7",
+      "display": "standalone"
+    },
+    "plugins": [
+      "expo-sqlite"
+    ]
   }
 }
